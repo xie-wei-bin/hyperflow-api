@@ -1,0 +1,12 @@
+# 博客系统 API — 开发环境（仅 Redis，MySQL 使用本机）
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD:-dev_redis_pass}
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-dev_redis_pass}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

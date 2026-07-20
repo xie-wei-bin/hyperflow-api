@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/你的用户名/blog-system/actions/workflows/ci.yml/badge.svg)](https://github.com/你的用户名/blog-system/actions)
 
-企业级博客后端系统，支持用户认证、文章管理、评论互动、收藏点赞、全文搜索、热门排行。
+博客后端系统，支持用户认证、文章管理、评论互动、收藏点赞、全文搜索、热门排行。
 
 ## 技术栈
 

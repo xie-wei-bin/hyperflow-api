@@ -1,4 +1,10 @@
-"""用户模型"""
+"""用户模型
+
+外键存在的一方 = 多 的一方
+没有外键、靠 relationship 列表反向关联 = 一 的一方
+字段类型是 Mapped[单模型] → 多对一
+字段类型是 Mapped[list[模型]] → 一对多
+"""
 
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -29,16 +35,16 @@ class User(Base):
     )
     avatar: Mapped[str | None] = mapped_column(String(500), default=None, comment="头像URL")
     role: Mapped[str] = mapped_column(
-        Enum("user", "admin", name="user_role"),
+        Enum("user", "admin", name="user_role"),#name="user_role" → 数据库创建枚举类型 TYPE user_role ENUM('user','admin')
         default="user",
         comment="角色：user普通用户、admin管理员",
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, comment="账号是否激活")
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), comment="注册时间"
-    )
+    )#func.now() 生成 DEFAULT CURRENT_TIMESTAMP，插入数据时数据库自动写入当前时间
 
-    # 关联关系
+    # 关联关系：关联数据类名中的关联名，需要另一方存在本表的外键作为通道，才能关联
     articles: Mapped[list["Article"]] = relationship(
         "Article", back_populates="author", lazy="selectin"
     )

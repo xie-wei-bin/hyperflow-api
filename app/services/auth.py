@@ -13,6 +13,7 @@ A: flush() → 把内存变更发到数据库（可获自增 ID），但事务�
 """
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import ConflictException, UnauthorizedException
@@ -27,25 +28,35 @@ from app.utils.security import (
 
 
 async def register(db: AsyncSession, data: RegisterRequest) -> User:
-    """用户注册 — 检查用户名和邮箱唯一性"""
-    # 检查用户名唯一性
-    result = await db.execute(select(User).where(User.username == data.username))
-    if result.scalar_one_or_none():
-        raise ConflictException("用户名已被注册")
+    """用户注册 — 合并用户名和邮箱检查，一次 SELECT 同时查两列"""
+    # 一次 SELECT 同时查用户名和邮箱，减少竞态窗口
+    result = await db.execute(
+        select(User).where(
+            (User.username == data.username) | (User.email == data.email)
+        )
+    )
+    existing = result.scalars().all()
 
-    # 检查邮箱唯一性
-    result = await db.execute(select(User).where(User.email == data.email))
-    if result.scalar_one_or_none():
-        raise ConflictException("邮箱已被注册")
+    # 精准区分冲突原因
+    for user in existing:
+        if user.username == data.username:
+            raise ConflictException("用户名已被注册")
+        if user.email == data.email:
+            raise ConflictException("邮箱已被注册")
 
     user = User(
         username=data.username,
         email=data.email,
         password_hash=hash_password(data.password),
-    )
+    )#这行代码只是调用了 User 类的构造函数，在 Python 的 RAM 中生成一个对象实例
     db.add(user)
-    await db.flush()  # 发 INSERT 但不提交，获取 user.id
-    await db.refresh(user)
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        raise ConflictException("用户名或邮箱已被注册")  # 兜底：并发极端场景
+
+    await db.refresh(user)#插入数据库后，从库中重新同步用户数据（自动回填自增主键 id、默认字段如 is_active、role），返回完整用户实例。
     return user
 
 
@@ -55,8 +66,8 @@ async def login(db: AsyncSession, username: str, password: str) -> dict[str, str
     result = await db.execute(
         select(User).where((User.username == username) | (User.email == username))
     )
-    user = result.scalar_one_or_none()
-
+    user = result.scalar_one_or_none()#取单条数据
+#verify_password：将前端明文密码与库中哈希比对
     if not user or not verify_password(password, user.password_hash):
         raise UnauthorizedException("用户名或密码错误")
 

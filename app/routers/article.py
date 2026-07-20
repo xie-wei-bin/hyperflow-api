@@ -31,6 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database import get_db
 from app.exceptions import ForbiddenException
 from app.middleware.auth import get_current_user
@@ -101,10 +102,16 @@ async def list_articles(
 
 @router.get("/hot", response_model=APIResponse[list[dict]])
 async def hot_articles(
-    limit: int = Query(default=20, ge=1, le=100), db: AsyncSession = Depends(get_db)
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
 ):
-    """热门排行 — 按阅读量降序"""
-    return APIResponse(data=await article_service.get_hot_articles(db, limit))
+    """热门排行 — 优先 ZSet 分页，Redis 挂了降级 MySQL"""
+    offset = (page - 1) * page_size
+    return APIResponse(
+        data=await article_service.get_hot_articles(db, page_size, offset=offset, redis=redis)
+    )
 
 
 @router.get("/{slug}", response_model=APIResponse[ArticleDetail])
@@ -130,7 +137,7 @@ async def get_article(
 
     # 步骤 3：阅读量 + 热门排行（Redis 原子操作）
     await redis.incr(f"blog:article:view:{article.id}")
-    await redis.zincrby("blog:article:hot", 1, str(article.id))
+    await redis.zincrby("blog:article:hot", settings.HOT_RANK_VIEW_WEIGHT, str(article.id))
 
     detail = {
         "id": article.id,
@@ -288,17 +295,18 @@ async def like_article(
     """
     await article_service.get_article_by_id(db, article_id)
     if await redis.sismember(f"blog:user:likes:{current_user.id}", str(article_id)):
-        return APIResponse(message="已点赞")  # 幂等：已点赞返回成功
+        return APIResponse(message="已点赞")
     like = Like(article_id=article_id, user_id=current_user.id)
     db.add(like)
     try:
-        await db.flush()
+        # begin_nested 创建 savepoint：回滚只影响 INSERT，不影响请求内之前的写操作
+        async with db.begin_nested():
+            await db.flush()
     except IntegrityError:
-        await db.rollback()
-        return APIResponse(message="已点赞")  # 并发冲突 → 幂等
+        return APIResponse(message="已点赞")  # 并发冲突 → savepoint 自动回滚
     await redis.sadd(f"blog:user:likes:{current_user.id}", str(article_id))
     await redis.incr(f"blog:article:likes:{article_id}")
-    await redis.zincrby("blog:article:hot", 3, str(article_id))  # 点赞权重 ×3
+    await redis.zincrby("blog:article:hot", settings.HOT_RANK_LIKE_WEIGHT, str(article_id))  # 点赞权重 ×3
     return APIResponse(message="点赞成功")
 
 
@@ -321,6 +329,7 @@ async def unlike_article(
         await db.flush()
     await redis.srem(f"blog:user:likes:{current_user.id}", str(article_id))
     await redis.decr(f"blog:article:likes:{article_id}")
+    await redis.zincrby("blog:article:hot", -settings.HOT_RANK_LIKE_WEIGHT, str(article_id))  # 回退点赞权重
     return APIResponse(message="已取消点赞")
 
 
@@ -338,12 +347,12 @@ async def favorite_article(
     favorite = Favorite(article_id=article_id, user_id=current_user.id)
     db.add(favorite)
     try:
-        await db.flush()
+        async with db.begin_nested():
+            await db.flush()
     except IntegrityError:
-        await db.rollback()
         return APIResponse(message="已收藏")
     await redis.sadd(f"blog:user:favorites:{current_user.id}", str(article_id))
-    await redis.zincrby("blog:article:hot", 3, str(article_id))
+    await redis.zincrby("blog:article:hot", settings.HOT_RANK_FAVORITE_WEIGHT, str(article_id))
     return APIResponse(message="收藏成功")
 
 
@@ -367,4 +376,5 @@ async def unfavorite_article(
         await db.delete(favorite)
         await db.flush()
     await redis.srem(f"blog:user:favorites:{current_user.id}", str(article_id))
+    await redis.zincrby("blog:article:hot", -settings.HOT_RANK_FAVORITE_WEIGHT, str(article_id))  # 回退收藏权重
     return APIResponse(message="已取消收藏")

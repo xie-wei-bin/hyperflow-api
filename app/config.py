@@ -21,6 +21,7 @@ A: Settings 只读，全局共享一份实例即可，避免反复读取 .env �
 
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -37,13 +38,14 @@ class Settings(BaseSettings):
 
     # ── Redis ─────────────────────────────
     # 面试点：Redis URL 格式 redis://host:port/db，/0 表示第 0 号数据库（共 16 个）
+    #Redis 没设密码
     REDIS_URL: str = "redis://localhost:6379/0"
 
     # ── JWT ───────────────────────────────
     # 面试点：为什么双 Token？
     # access(15min) 高频使用，短时效减少泄露风险
     # refresh(7天) 低频使用，避免用户频繁登录
-    JWT_SECRET_KEY: str
+    JWT_SECRET_KEY: str = ""  # 必须提供，建议至少 32 字符（openssl rand -hex 32）
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
@@ -53,14 +55,34 @@ class Settings(BaseSettings):
     # .env 里写 ALLOWED_ORIGINS=["http://localhost:3000"]
     ALLOWED_ORIGINS: list[str] = ["http://localhost:3000"]
 
+    # ── 热门排行权重 ──────────────────────
+    HOT_RANK_VIEW_WEIGHT: int = 1      # 阅读权重
+    HOT_RANK_LIKE_WEIGHT: int = 3      # 点赞权重
+    HOT_RANK_FAVORITE_WEIGHT: int = 3  # 收藏权重
+    HOT_RANK_COMMENT_WEIGHT: int = 5   # 评论权重
+
     # ── 日志 ──────────────────────────────
-    # 面试点：LEVEL 控制输出多少，ENVIRONMENT 控制怎么输出
-    # 两者正交：Staging 可以 DEBUG + JSON（排查不破坏日志平台）
     LOG_LEVEL: str = "INFO"
     ENVIRONMENT: str = "development"  # development / staging / production
+    LOG_FILE_ENABLED: bool = True  # K8s/Docker 输出到 stdout 时设为 False
+    LOG_FILE: str = "logs/app.log"  # 日志文件路径
+    LOG_FILE_MAX_BYTES: int = 50 * 1024 * 1024  # 单个日志文件最大 50MB
+    LOG_FILE_BACKUP_COUNT: int = 10  # 保留最近 10 个滚动文件
 
     # Docker 用（docker-compose 读 .env，Pydantic 需允许此字段出现）
     REDIS_PASSWORD: str = ""
+#model_validator是 Pydantic V2 提供的模型校验装饰器
+    #mode = "before"：父类解析字段之前执行；
+    #mode = "after"：所有字段解析、赋值完成之后再执行自定义校验
+    @model_validator(mode="after")
+    def _check_jwt_secret(self):
+        """启动即校验：JWT 密钥太短直接报错，防止弱密钥进生产"""
+        if len(self.JWT_SECRET_KEY) < 16:
+            raise ValueError(
+                f"JWT_SECRET_KEY 长度不足（{len(self.JWT_SECRET_KEY)} 字符），"
+                "至少 16 字符，建议 32 字符：openssl rand -hex 32"
+            )
+        return self#mode="after" 后置校验函数必须返回 self
 
     model_config = SettingsConfigDict(
         env_file=str(Path(__file__).resolve().parent.parent / ".env"),  # 绝对路径，去哪执行都行

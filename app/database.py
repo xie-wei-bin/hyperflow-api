@@ -90,6 +90,17 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     Q: 为什么 commit 在 yield 之后而不是在路由里？
     A: 业务代码不应该关心事务管理。路由只做逻辑，事务由框架保证。
        如果在路由里 commit，忘记调用的风险很高。
+
+       async_session()是异步方法，所以要用async with
+连接池 ──取──→ Session ──yield──→ 路由用 ──return──→ commit/rollback ──→ 还回连接池
+                 （出生）              （活着）              （死亡）
+                                        │
+                                    增删改查
+                                    flush
+                                    refresh
+                                    （都在事务保护下）
+
+  你的每一个 HTTP 请求都是这个流程，不需要手动管理，FastAPI + Depends 全自动。
     """
     async with async_session() as session:  # ← 每次 NEW
         try:

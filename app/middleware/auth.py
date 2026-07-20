@@ -39,8 +39,14 @@ from app.utils.security import decode_token
 # 面试点：HTTPBearer(auto_error=False)
 # auto_error=False → token 缺失时不自动报 403，返回 None
 # 这样未登录访问公开接口不会报错，需要认证的接口再检查
+#FastAPI 内置的提取 Authorization: Bearer xxx 请求头工具，专门拿 JWT
 security = HTTPBearer(auto_error=False)
-
+"""
+credentials: HTTPAuthorizationCredentials | None = Depends(security)
+依赖 security 自动解析请求头 Bearer token；没传则为 None
+db: AsyncSession = Depends(get_db)
+自动注入异步数据库会话，用来根据 token 里的 user_id 查询真实用户
+"""
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
@@ -61,7 +67,7 @@ async def get_current_user(
     if credentials is None:
         raise UnauthorizedException("请先登录")
 
-    payload = decode_token(credentials.credentials)
+    payload = decode_token(credentials.credentials)#credentials.credentials是这个对象内部存储 JWT 字符串的字段
     if payload is None:
         raise UnauthorizedException("Token 无效或已过期")
 
@@ -74,11 +80,17 @@ async def get_current_user(
 
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
+    """
+    scalar_one_or_none() 是异步 SQLAlchemy 专用取值方法，含义：
+如果查到一条匹配数据：返回 User ORM 实体对象；
+如果一条都没查到：返回 None；
+如果查出多条（主键唯一不可能出现）：直接抛异常
+"""
 
     if user is None:
         raise UnauthorizedException("用户不存在")
 
-    if not user.is_active:
+    if not user.is_active:#用户类中的布尔值is_active
         raise ForbiddenException("账号已被禁用")
 
     return user

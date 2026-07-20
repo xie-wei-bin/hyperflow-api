@@ -8,8 +8,8 @@ A: 1. DRY：100 个路由不用写 100 次 time.time()
    3. 洋葱模型：包在最外层，记录的是完整耗时（含中间件链 + 路由 + 异常处理）
 
 Q: 中间件的执行顺序？
-A: CORS → RequestID → Timing → 路由
-   Timing 在外层但 RequestID 先注入，所以 timing 日志里能带 request_id
+A请求下行执行顺序：CORS（外层） → RequestID → Timing → 路由
+RequestID 在 Timing 外层，请求进入 Timing 前已完成 request_id 注入，因此 Timing 日志能稳定读取到追踪 ID，无缺失风险。
 """
 
 import time
@@ -29,14 +29,17 @@ class TimingMiddleware(BaseHTTPMiddleware):
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         start_time = time.time()
-        response = await call_next(request)  # ← 所有中间件 + 路由都在这一行里执行
+        response = await call_next(request)
         duration_ms = (time.time() - start_time) * 1000
         await logger.ainfo(
-            "request.completed",
-            method=request.method,
-            path=request.url.path,
+            "request.completed",#日志标识名，用来区分日志类型，过滤所有请求完成日志
+            method=request.method,#请求方式：GET / POST / PUT / DELETE
+            path=request.url.path,#请求接口路由路径，如 /article/list，不含域名、查询参数
             status_code=response.status_code,
             duration_ms=round(duration_ms, 2),
+            # contextvars 在 BaseHTTPMiddleware 中可能丢失 context，
+            # request.state.request_id 作为保底，确保 timing 日志一定带 ID
             request_id=getattr(request.state, "request_id", None),
+            #getattr(对象, 属性名, 默认值)：安全读取对象属性
         )
         return response

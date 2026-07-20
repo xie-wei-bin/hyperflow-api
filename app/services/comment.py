@@ -25,7 +25,7 @@ A: is_deleted=True → content 显示为"该评论已被删除"，但保留结�
 
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -33,45 +33,87 @@ from app.exceptions import NotFoundException
 from app.models.comment import Comment
 
 
+# 评论量阈值：≤ 此值用全量内存分组（不限层级），> 此值用分页 + 预加载（省内存）
+_COMMENT_FLAT_THRESHOLD = 200
+
+
 async def get_article_comments(db: AsyncSession, article_id: int) -> list[dict[str, Any]]:
     """
-    获取文章评论（树形结构）
+    获取文章评论（树形结构）— 按评论量自适应选策略
 
-    面试点：先查顶级评论（parent_id IS NULL），selectinload 预加载 replies
-    然后在 Python 里递归构建树，避免对数据库多次查询
+    少量评论（≤200）：一次全量查询 → Python 内存按 parent_id 分组构建树
+    大量评论（>200）：顶级评论分页 + selectinload 预加载子回复
     """
+    # 先 COUNT 决定走哪条路
+    count_result = await db.execute(
+        select(func.count()).select_from(Comment).where(Comment.article_id == article_id)
+    )
+    total = count_result.scalar() or 0
+
+    if total <= _COMMENT_FLAT_THRESHOLD:
+        return await _get_comments_flat(db, article_id)
+    return await _get_comments_paginated(db, article_id)
+
+
+async def _get_comments_flat(db: AsyncSession, article_id: int) -> list[dict[str, Any]]:
+    """少量评论：全量查出 → 内存分组 → 不限层级"""
     result = await db.execute(
         select(Comment)
-        .options(selectinload(Comment.user), selectinload(Comment.replies))
+        .options(selectinload(Comment.user))
+        .where(Comment.article_id == article_id)
+        .order_by(Comment.created_at.asc())
+    )
+    all_comments = result.scalars().all()
+
+    children: dict[int | None, list[dict[str, Any]]] = {}
+    for c in all_comments:
+        node = _comment_to_dict(c)
+        children.setdefault(c.parent_id, []).append(node)
+
+    def build_tree(parent_id: int | None) -> list[dict[str, Any]]:
+        result_list = []
+        for node in children.get(parent_id, []):
+            node["replies"] = build_tree(node["id"])
+            result_list.append(node)
+        return result_list
+
+    return list(reversed(build_tree(None)))
+
+
+async def _get_comments_paginated(db: AsyncSession, article_id: int) -> list[dict[str, Any]]:
+    """大量评论：顶级评论分页，子回复用 selectinload 预加载 3 层"""
+    result = await db.execute(
+        select(Comment)
+        .options(
+            selectinload(Comment.user),
+            selectinload(Comment.replies)
+            .selectinload(Comment.replies)
+            .selectinload(Comment.replies),
+        )
         .where(Comment.article_id == article_id, Comment.parent_id == None)  # noqa: E711
         .order_by(Comment.created_at.desc())
+        .limit(50)
     )
-    comments = result.scalars().all()
-    return [_build_comment_tree(c) for c in comments]
+    return [_comment_to_tree(c) for c in result.scalars().all()]
 
 
-def _build_comment_tree(comment: Comment) -> dict[str, Any]:
-    """
-    递归构建评论树
-
-    面试点：递归终止条件 — replies 列表为空时返回空数组
-    每层递归处理: 当前评论 → 其 replies → replies 的 replies → ...
-    is_deleted 的评论：内容替换但保留结构，子回复正常显示
-    """
+def _comment_to_dict(comment: Comment) -> dict[str, Any]:
     return {
         "id": comment.id,
         "content": comment.content if not comment.is_deleted else "该评论已被删除",
         "article_id": comment.article_id,
-        "user": {
-            "id": comment.user.id,
-            "username": comment.user.username,
-            "avatar": comment.user.avatar,
-        },
+        "user": {"id": comment.user.id, "username": comment.user.username, "avatar": comment.user.avatar},
         "parent_id": comment.parent_id,
         "is_deleted": comment.is_deleted,
         "created_at": comment.created_at.isoformat(),
-        "replies": [_build_comment_tree(reply) for reply in (comment.replies or [])],
     }
+
+
+def _comment_to_tree(comment: Comment) -> dict[str, Any]:
+    """selectinload 路径：ORM 已预加载 replies，直接递归"""
+    node = _comment_to_dict(comment)
+    node["replies"] = [_comment_to_tree(r) for r in (comment.replies or [])]
+    return node
 
 
 async def create_comment(db: AsyncSession, article_id: int, user_id: int, content: str) -> Comment:
@@ -87,16 +129,24 @@ async def create_comment(db: AsyncSession, article_id: int, user_id: int, conten
 
 
 async def reply_comment(db: AsyncSession, parent_id: int, user_id: int, content: str) -> Comment:
-    """回复评论（创建子评论）"""
-    # 验证被回复的评论存在
+    """回复评论（创建子评论），限制最多 3 层嵌套"""
+    from app.exceptions import BadRequestException
+
     result = await db.execute(select(Comment).where(Comment.id == parent_id))
     parent = result.scalar_one_or_none()
     if not parent:
         raise NotFoundException("父评论不存在")
 
-    # 子评论继承父评论的 article_id
+    # depth 字段存了层级：0=顶级 1=一级回复 2=二级回复，O(1) 判断无需循环查表
+    if parent.depth >= 2:
+        raise BadRequestException("评论嵌套已达上限（3 层），无法继续回复")
+
     comment = Comment(
-        content=content, article_id=parent.article_id, user_id=user_id, parent_id=parent_id
+        content=content,
+        article_id=parent.article_id,
+        user_id=user_id,
+        parent_id=parent_id,
+        depth=parent.depth + 1,  # 子评论层级 = 父评论 +1
     )
     db.add(comment)
     await db.flush()

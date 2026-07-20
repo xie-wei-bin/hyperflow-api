@@ -14,6 +14,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy import Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base
@@ -64,6 +65,15 @@ class Article(Base):
         DateTime, server_default=func.now(), onupdate=func.now(), comment="最后更新时间"
     )
 
+    # 表级约束和索引
+    #Index(索引名, 字段1, 字段2, ..., 数据库专属参数)
+    #func.match() 里面的字段列表，必须和这条 FULLTEXT 索引的字段完全一致、顺序一致
+    #MySQL 原生全文中文分词弱，海量内容搜索建议 ES
+    __table_args__ = (
+        # FULLTEXT 全文索引：MySQL 倒排索引，搜索标题+正文，比 LIKE 快几十倍
+        Index("ft_title_content", "title", "content", mysql_prefix="FULLTEXT"),
+    )
+
     # 关联关系
     author: Mapped["User"] = relationship("User", back_populates="articles")
     category: Mapped["Category | None"] = relationship("Category", back_populates="articles")
@@ -77,7 +87,7 @@ class Article(Base):
         "Tag",
         secondary="article_tag",
         lazy="selectin",
-        viewonly=True,
+        viewonly=True,#只读视图，禁止通过这个字段做增删改操作
     )
     likes: Mapped[list["Like"]] = relationship(
         "Like", back_populates="article", lazy="selectin", cascade="all, delete-orphan"
@@ -89,7 +99,8 @@ class Article(Base):
 
 class ArticleTag(Base):
     __tablename__ = "article_tag"
-
+#两个 primary_key=True 已经构成了复合主键，自带唯一约束
+#UniqueConstraint 是多余的
     article_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("article.id", ondelete="CASCADE"), primary_key=True, comment="文章ID"
     )
@@ -99,5 +110,5 @@ class ArticleTag(Base):
 
     article: Mapped["Article"] = relationship("Article", back_populates="article_tags")
     tag: Mapped["Tag"] = relationship("Tag", back_populates="article_tags")
-
+#文章和标签的配对保证唯一，同一篇文章不能多次打同一个标签。
     __table_args__ = (UniqueConstraint("article_id", "tag_id", name="uq_article_tag"),)

@@ -15,16 +15,15 @@ from pydantic import BaseModel, EmailStr, Field
 
 
 class UserPublic(BaseModel):
-    """用户公开信息 — 查别人时返回这个"""
+    """用户公开信息 — 查别人时返回这个（不含邮箱等隐私字段）"""
 
     id: int
     username: str
-    email: str
     avatar: str | None = None
     role: str
     created_at: datetime
 
-    model_config = {"from_attributes": True}  # 允许从 ORM 对象直接转换
+    model_config = {"from_attributes": True}  # 允许从 ORM 对象直接转换，不用手动转字典
 
 
 class UserProfile(BaseModel):

@@ -3,9 +3,9 @@
 
 === 面试重点 ===
 Q: 为什么测试不用真实 MySQL 和 Redis？
-A: 1. 速度：SQLite 内存模式比 MySQL 快 10 倍+，12 个测试跑完不到 5 秒
+A: 1. 速度：SQLite 比 MySQL 快，测试跑完不到 15 秒
    2. 环境无关：CI 服务器不需要装 MySQL/Redis，拉代码就能跑
-   3. 隔离：每次测试前后自动建表/删表，测试之间不互相污染
+   3. 隔离：每个测试前后自动建表/删表，测试之间不互相污染
    4. 确定性：Mock Redis 没有网络延迟，行为完全可控
 
 Q: dependency_overrides 机制是什么？
@@ -17,7 +17,7 @@ A: FastAPI 允许在运行时替换依赖：
 
 Q: MockRedis 为什么不直接用 fakeredis 库？
 A: fakeredis 是成熟方案，但为了零外部依赖选择了手写。
-   手写的 MockRedis 覆盖了我们实际使用的 7 个方法，
+   手写的 MockRedis 覆盖了我们实际使用的核心方法，
    够用且比 fakeredis 更轻。如果项目变大，再换成 fakeredis 即可
 
 Q: autouse=True 什么含义？
@@ -31,18 +31,30 @@ from collections.abc import AsyncGenerator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.database import get_db
+from app.limiter import limiter
 from app.main import app
 from app.models.base import Base
 from app.redis_client import get_redis
 
 # 面试点：SQLite+aiosqlite 替代 MySQL，测试无需外部依赖
-# /./test.db 是相对路径，测试结束后可删除
 TEST_DATABASE_URL = "sqlite+aiosqlite:///./test.db"
 
 test_engine = create_async_engine(TEST_DATABASE_URL, echo=False)
+
+
+# SQLite 默认不开启外键约束，手动 PRAGMA
+@event.listens_for(test_engine.sync_engine, "connect")
+def _set_sqlite_pragma(dbapi_connection, connection_record):
+    """开启 SQLite 外键约束以支持 ondelete CASCADE"""
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
 test_async_session = async_sessionmaker[AsyncSession](
     test_engine,
     class_=AsyncSession,
@@ -65,7 +77,7 @@ class MockRedis:
     """
     内存 Redis 模拟
 
-    面试点：只实现项目真实使用的 7 个方法
+    面试点：只实现项目真实使用的核心方法
     不需要完整仿制所有 Redis 命令，按需实现即可
     """
 
@@ -106,6 +118,15 @@ class MockRedis:
         zset[value] = zset.get(value, 0) + amount
         self._data[key] = json.dumps(zset)
         return zset[value]
+
+    async def zrevrange(self, key: str, start: int, stop: int) -> list[str]:
+        """ZREVRANGE：按分数降序取排名，start=0 stop=19 取 Top 20"""
+        import json
+
+        zset: dict[str, float] = json.loads(self._data.get(key, "{}"))
+        # 按分数降序排列
+        sorted_items = sorted(zset.items(), key=lambda x: x[1], reverse=True)
+        return [member for member, _ in sorted_items[start:stop + 1]]
 
     async def sadd(self, key: str, *values: str) -> int:
         if key not in self._sets:
@@ -152,20 +173,28 @@ def event_loop():
 @pytest.fixture(autouse=True)
 async def setup_database():
     """
-    每个测试前后自动建表/删表 + 清理 Mock Redis
+    每个测试前后清空数据库 + 清理 Mock Redis
 
-    面试点：隔离性 — 测试 A 创建的用户不会影响测试 B
-    如果测试 B 依赖测试 A 的数据，一旦 A 失败 B 也跟着失败
-    每个测试独立是单元测试的基本要求
+    面试点：不删表重建，而是清空数据——
+    避免 SQLite drop_all 外键约束问题，更快更稳定
     """
+    # 首次运行建表
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # 重置限流器状态（避免跨测试累加导致 429）
+    limiter.reset()
+
     mock_redis._data.clear()
     mock_redis._sets.clear()
     mock_redis._ttl.clear()
+
     yield
+
+    # 测试后清空所有表数据（反向遍历处理外键依赖）
     async with test_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
+        for table in reversed(Base.metadata.sorted_tables):
+            await conn.execute(table.delete())
 
 
 @pytest.fixture

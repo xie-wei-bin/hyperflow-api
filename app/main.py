@@ -10,11 +10,9 @@ A: 1. 原生异步（Flask 需要额外插件）
    5. 性能：Starlette 底层，接近 Node.js 吞吐
 
 Q: 中间件和异常处理器的执行顺序？
-A: 请求 → CORS → RequestID → Timing → 路由 → 异常处理器 → 响应
-   CORS 最先：拒绝跨域请求，不需要后面的处理
-   RequestID 尽早注入后续日志都能用
-   Timing 包在最外层，记录真实耗时
-   异常处理器在路由层，捕捉业务异常
+A: 请求 → RequestID → Timing → 路由 → 异常处理器 → 响应
+   RequestID 在最外层：先把 request_id 绑定好，内层 Timing 记录日志时才能拿到
+   Timing 在内层：记录完整耗时中间件链，但 request_id 已由外层注入
 
 Q: lifespan 和 @app.on_event("startup") 的区别？
 A: lifespan 是新的推荐方式，用一个 async with 管理启动和关闭。
@@ -124,10 +122,10 @@ app.add_middleware(
 )
 
 # ── 自定义中间件 ────────────────────────────────
-# 面试点：add_middleware 的顺序 = 执行顺序
-# RequestID 先于 Timing，这样 Timing 日志里能带上 request_id
-app.add_middleware(RequestIDMiddleware)
-app.add_middleware(TimingMiddleware)
+# 面试点：add_middleware 后加的在外层（洋葱模型）压栈
+# RequestID 必须在外层：先绑定 ID → Timing 内层记录日志时才能拿到
+app.add_middleware(TimingMiddleware)# 先注册 Timing → 内层
+app.add_middleware(RequestIDMiddleware)# 后注册 RequestID → 外层，最先拦截请求
 
 # ── 全局异常处理器 ──────────────────────────────
 # 面试点：为什么注册 5 个异常处理器？

@@ -45,4 +45,4 @@ class TokenData(BaseModel):
 
     user_id: int
     username: str
-    role: str
+    role: str#角色

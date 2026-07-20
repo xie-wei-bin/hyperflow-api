@@ -35,6 +35,7 @@ async def search_articles(
         )
         .where(
             Article.status == "published",
+            Article.is_deleted == False,  # noqa: E712
             func.match(Article.title, Article.content).against(keyword),
         )
         .order_by(Article.published_at.desc())
@@ -46,6 +47,7 @@ async def search_articles(
         .select_from(Article)
         .where(
             Article.status == "published",
+            Article.is_deleted == False,  # noqa: E712
             func.match(Article.title, Article.content).against(keyword),
         )
     )
@@ -55,6 +57,6 @@ async def search_articles(
     offset = (page - 1) * page_size
     query = query.offset(offset).limit(page_size)
     result = await db.execute(query)
-    articles = list(result.scalars().all())
+    articles = result.scalars().all()
 
     return articles, total

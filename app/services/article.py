@@ -60,7 +60,10 @@ async def get_article_list(
     面试点：selectinload 预加载关联数据，避免 N+1
     没有 selectinload：查 20 篇文章 → 每篇查 author(×20) + category(×20) + tags(×20)
     有了 selectinload：3 次 IN 查询 → 批量查出所有 author/category/tags
+    options() 是 Select 对象的方法，用来给查询附加加载选项（Loading Option），
+    控制 ORM 如何加载关联表数据（一对多、多对一、多对多）。
     """
+    #query = 写好的 SQL 草稿，只是拼装规则，不执行
     query = (
         select(Article)
         .options(
@@ -69,17 +72,23 @@ async def get_article_list(
             selectinload(Article.tags),
         )
         .where(Article.is_deleted == False)  # noqa: E712
-    )  # 软删除过滤
-
+    )  # 软删除过滤，类中代表该接口只查询未删除的文章
+#按需追加 WHERE 筛选条件，有入参才拼接，无参数不增加过滤，实现灵活多条件搜索
+    #query.where() 会生成全新查询对象，所以需要重新赋值 query = query.where(...)。
     if status:
         query = query.where(Article.status == status)
     if category_id:
         query = query.where(Article.category_id == category_id)
     if tag_id:
+        #Article.tags 是多对多关系，不能直接用 == 匹配，.any() 多对多关联查询
         query = query.where(Article.tags.any(Tag.id == tag_id))
     if search:
         # 面试点：MySQL FULLTEXT 搜索，比 LIKE '%keyword%' 快几十倍
         # LIKE 全表扫描，FULLTEXT 走倒排索引
+        #func.match MySQL 全文索引检索
+        #当前端传入 search 关键词时，对文章标题、内容做 MySQL 全文索引检索，替代低效的 LIKE '%xxx%'。
+        #func.match(col1, col2)：标记要参与全文检索的字段列表，支持一次性传入多个字段，逗号分隔
+        #.against(关键词)：传入用户搜索词
         query = query.where(func.match(Article.title, Article.content).against(search))
 
     # 排序
@@ -97,7 +106,7 @@ async def get_article_list(
     offset = (page - 1) * page_size
     query = query.offset(offset).limit(page_size)
     result = await db.execute(query)
-    articles = list(result.scalars().all())
+    articles = result.scalars().all()
 
     return articles, total
 
@@ -109,7 +118,7 @@ async def get_article_by_slug(db: AsyncSession, slug: str) -> Article:
         .options(
             selectinload(Article.author), selectinload(Article.category), selectinload(Article.tags)
         )
-        .where(Article.slug == slug)
+        .where(Article.slug == slug, Article.is_deleted == False)  # noqa: E712
     )
     article = result.scalar_one_or_none()
     if not article:
@@ -134,7 +143,7 @@ async def get_article_by_id(db: AsyncSession, article_id: int) -> Article:
 
 async def create_article(db: AsyncSession, data: dict[str, Any], author_id: int) -> Article:
     """创建文章 + 关联标签"""
-    tag_ids = data.pop("tag_ids", [])
+    tag_ids = data.pop("tag_ids", [])#tag_ids在创建文章请求里面
 
     article = Article(**data, author_id=author_id)
     db.add(article)
@@ -143,14 +152,22 @@ async def create_article(db: AsyncSession, data: dict[str, Any], author_id: int)
     if tag_ids:
         from app.models.article import ArticleTag
 
+        # 一次 IN 查询拿全部标签，避免 for 循环 N 次 SELECT
+        result = await db.execute(select(Tag).where(Tag.id.in_(tag_ids)))
+        tags = {t.id: t for t in result.scalars().all()}
         for tag_id in tag_ids:
-            tag = await db.get(Tag, tag_id)
-            if tag:
-                db.add(ArticleTag(article_id=article.id, tag_id=tag.id))
+            if tag_id in tags:
+                #article_id：当前刚创建文章的主键，来自第一次 await db.flush() 后拿到的自增 ID
+                db.add(ArticleTag(article_id=article.id, tag_id=tag_id))
 
     await db.flush()
     await db.refresh(article)  # 重新加载，获取预加载的关联数据
     return article
+
+
+# 更新文章允许修改的字段白名单，防止前端传入无关字段污染模型
+_ARTICLE_UPDATABLE = {"title", "slug", "content", "summary", "cover_image",
+                      "status", "category_id", "published_at"}
 
 
 async def update_article(db: AsyncSession, article: Article, data: dict[str, Any]) -> Article:
@@ -158,7 +175,7 @@ async def update_article(db: AsyncSession, article: Article, data: dict[str, Any
     tag_ids = data.pop("tag_ids", None)
 
     for key, value in data.items():
-        if value is not None:
+        if value is not None and key in _ARTICLE_UPDATABLE:
             setattr(article, key, value)
 
     if tag_ids is not None:
@@ -168,65 +185,82 @@ async def update_article(db: AsyncSession, article: Article, data: dict[str, Any
         for at in list(article.article_tags):
             await db.delete(at)
         await db.flush()
+        # 一次 IN 查询拿全部标签，避免 for 循环 N 次 SELECT
+        result = await db.execute(select(Tag).where(Tag.id.in_(tag_ids)))
+        tags = {t.id: t for t in result.scalars().all()}
         for tag_id in tag_ids:
-            tag = await db.get(Tag, tag_id)
-            if tag:
-                db.add(ArticleTag(article_id=article.id, tag_id=tag.id))
+            if tag_id in tags:
+                db.add(ArticleTag(article_id=article.id, tag_id=tag_id))
 
     await db.flush()
     await db.refresh(article)
     return article
 
 
-async def get_hot_articles(db: AsyncSession, limit: int = 20) -> list[dict[str, Any]]:
+async def get_hot_articles(
+    db: AsyncSession, limit: int = 20, offset: int = 0, redis=None
+) -> list[dict[str, Any]]:
     """
-    热门文章排行 — 按阅读量排序
+    热门文章排行 — 优先 ZSet 分页，Redis 挂了降级 MySQL
 
-    面试点：生产环境应该用 Redis ZSet（ZREVRANGE）而非 MySQL ORDER BY
-    这里保留 MySQL 版本作为 Redis 不可用时的降级方案
+    面试点：zrevrange(offset, offset+limit-1) 天然支持分页，
+    跳过 N 条取 M 条，不像 MySQL OFFSET 需要扫描再丢弃
     """
-    result = await db.execute(
-        select(Article)
-        .options(selectinload(Article.author), selectinload(Article.category))
-        .where(Article.status == "published", Article.is_deleted == False)  # noqa: E712
-        .order_by(Article.view_count.desc())
-        .limit(limit)
-    )
-    articles = result.scalars().all()
+    article_ids: list[int] = []
 
-    # 批量查询 like_count：一次 IN 查询替代 N 次独立 COUNT
-    article_ids = [a.id for a in articles]
-    like_counts: dict[int, int] = {}
+    # ① 优先从 Redis ZSet 取排好序的文章 ID
+    if redis:
+        try:
+            raw = await redis.zrevrange("blog:article:hot", offset, offset + limit - 1)
+            article_ids = [int(i) for i in raw]
+        except Exception:
+            article_ids = []  # Redis 故障，降级 MySQL
+
+    # ② Redis 有数据 → 按 ZSet 顺序批量取文章
     if article_ids:
+        result = await db.execute(
+            select(Article)
+            .options(selectinload(Article.author), selectinload(Article.category))
+            .where(Article.id.in_(article_ids))
+        )
+        article_map = {a.id: a for a in result.scalars().all()}
+        # 保持 ZSet 排序，DB 里不存在的跳过
+        articles = [article_map[i] for i in article_ids if i in article_map]
+    else:
+        # ③ Redis 无数据或故障 → 降级 MySQL ORDER BY + OFFSET
+        result = await db.execute(
+            select(Article)
+            .options(selectinload(Article.author), selectinload(Article.category))
+            .where(Article.status == "published", Article.is_deleted == False)  # noqa: E712
+            .order_by(Article.view_count.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        articles = result.scalars().all()
+
+    # 批量查询 like_count
+    ids = [a.id for a in articles]
+    like_counts: dict[int, int] = {}
+    if ids:
         like_result = await db.execute(
             select(Like.article_id, func.count().label("cnt"))
-            .where(Like.article_id.in_(article_ids))
+            .where(Like.article_id.in_(ids))
             .group_by(Like.article_id)
         )
         like_counts = {row.article_id: row.cnt for row in like_result.all()}
 
     hot_list: list[dict[str, Any]] = []
     for article in articles:
-        like_count = like_counts.get(article.id, 0)
-
-        hot_list.append(
-            {
-                "id": article.id,
-                "title": article.title,
-                "slug": article.slug,
-                "summary": article.summary,
-                "view_count": article.view_count,
-                "like_count": like_count,
-                "author": {
-                    "id": article.author.id,
-                    "username": article.author.username,
-                    "avatar": article.author.avatar,
-                },
-                "category": {"id": article.category.id, "name": article.category.name}
-                if article.category
-                else None,
-                "published_at": article.published_at.isoformat() if article.published_at else None,
-            }
-        )
+        hot_list.append({
+            "id": article.id,
+            "title": article.title,
+            "slug": article.slug,
+            "summary": article.summary,
+            "view_count": article.view_count,
+            "like_count": like_counts.get(article.id, 0),
+            "author": {"id": article.author.id, "username": article.author.username, "avatar": article.author.avatar},
+            "category": {"id": article.category.id, "name": article.category.name} if article.category else None,
+            "published_at": article.published_at.isoformat() if article.published_at else None,
+        })
 
     return hot_list

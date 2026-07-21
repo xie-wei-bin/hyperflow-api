@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db
 from app.exceptions import ForbiddenException, NotFoundException
-from app.middleware.auth import get_current_user
+from app.middleware.auth import get_current_user, require_permission
 from app.models.comment import Comment
 from app.models.user import User
 from app.redis_client import get_redis
@@ -123,13 +123,30 @@ async def delete_comment(
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
 ):
-    """删除评论 — 软删除（作者本人或管理员）"""
+    """删除评论 — 软删除（作者本人或有 comment:delete:any 权限的管理员）"""
     result = await db.execute(select(Comment).where(Comment.id == comment_id))
     comment = result.scalar_one_or_none()
     if not comment:
         raise NotFoundException("评论不存在")
-    if comment.user_id != current_user.id and current_user.role != "admin":
-        raise ForbiddenException("无权删除此评论")
+
+    # 面试点：RBAC 权限判断 — 自己是作者 OR 有 comment:delete:any 权限
+    is_owner = comment.user_id == current_user.id
+    if not is_owner:
+        # 不是作者 → 检查是否有"删除任何评论"权限
+        from sqlalchemy import select as _sel
+
+        from app.models.rbac import Permission, Role
+
+        has_perm = await db.scalar(
+            _sel(Permission)
+            .join(Role.permissions)
+            .join(Role.users)
+            .where(User.id == current_user.id, Permission.name == "comment:delete:any")
+            .limit(1)
+        )
+        if not has_perm:
+            raise ForbiddenException("无权删除此评论")
+
     comment.is_deleted = True
     comment.content = "该评论已被删除"
     await db.flush()

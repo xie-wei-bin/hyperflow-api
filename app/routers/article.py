@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db
 from app.exceptions import ForbiddenException
-from app.middleware.auth import get_current_user
+from app.middleware.auth import get_current_user, require_permission
 from app.models.like_favorite import Favorite, Like
 from app.models.user import User
 from app.redis_client import get_redis
@@ -217,10 +217,22 @@ async def update_article(
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
 ):
-    """编辑文章（作者本人或管理员）— 更新后主动失效缓存"""
+    """编辑文章（作者本人或有 article:update:any 权限的管理员）— 更新后主动失效缓存"""
     article = await article_service.get_article_by_id(db, article_id)
-    if article.author_id != current_user.id and current_user.role != "admin":
-        raise ForbiddenException("无权编辑此文章")
+    # 面试点：RBAC 权限判断 — 自己是作者 OR 有 article:update:any 权限
+    is_owner = article.author_id == current_user.id
+    if not is_owner:
+        from app.models.rbac import Permission, Role
+
+        has_perm = await db.scalar(
+            select(Permission)
+            .join(Role.permissions)
+            .join(Role.users)
+            .where(User.id == current_user.id, Permission.name == "article:update:any")
+            .limit(1)
+        )
+        if not has_perm:
+            raise ForbiddenException("无权编辑此文章")
     article = await article_service.update_article(db, article, data.model_dump(exclude_none=True))
     # 面试点：主动失效缓存（Cache Invalidation）
     await redis.delete(f"blog:article:cache:{article.slug}")
@@ -271,8 +283,19 @@ async def delete_article(
     3. 审计合规：用户发布过的内容需要保留痕迹
     """
     article = await article_service.get_article_by_id(db, article_id)
-    if article.author_id != current_user.id and current_user.role != "admin":
-        raise ForbiddenException("无权删除此文章")
+    is_owner = article.author_id == current_user.id
+    if not is_owner:
+        from app.models.rbac import Permission, Role
+
+        has_perm = await db.scalar(
+            select(Permission)
+            .join(Role.permissions)
+            .join(Role.users)
+            .where(User.id == current_user.id, Permission.name == "article:delete:any")
+            .limit(1)
+        )
+        if not has_perm:
+            raise ForbiddenException("无权删除此文章")
     article.is_deleted = True
     await db.flush()
     await redis.delete(f"blog:article:cache:{article.slug}")

@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.exceptions import ConflictException, NotFoundException
-from app.middleware.auth import get_current_admin
+from app.middleware.auth import get_current_user, require_permission
 from app.models.article import Article
 from app.models.category import Category
 from app.schemas.category import CategoryCreate, CategoryUpdate
@@ -40,10 +40,10 @@ async def list_categories(db: AsyncSession = Depends(get_db)):
 @router.post("", status_code=201, response_model=APIResponse[dict])
 async def create_category(
     data: CategoryCreate,
-    current_admin=Depends(get_current_admin),
+    current_user=Depends(require_permission("category:create")),
     db: AsyncSession = Depends(get_db),
 ):
-    """创建分类（管理员）"""
+    """创建分类（需 category:create 权限）"""
     result = await db.execute(select(Category).where(Category.name == data.name))
     if result.scalar_one_or_none():
         raise ConflictException("分类名已存在")
@@ -62,10 +62,10 @@ async def create_category(
 async def update_category(
     category_id: int,
     data: CategoryUpdate,
-    current_admin=Depends(get_current_admin),
+    current_user=Depends(require_permission("category:update")),
     db: AsyncSession = Depends(get_db),
 ):
-    """更新分类（管理员）"""
+    """更新分类（需 category:update 权限）"""
     category = await db.get(Category, category_id)
     if not category:
         raise NotFoundException("分类不存在")
@@ -93,10 +93,10 @@ async def update_category(
 @router.delete("/{category_id}", response_model=APIResponse[dict])
 async def delete_category(
     category_id: int,
-    current_admin=Depends(get_current_admin),
+    current_user=Depends(require_permission("category:delete")),
     db: AsyncSession = Depends(get_db),
 ):
-    """删除分类（管理员，有关联文章时禁止）"""
+    """删除分类（需 category:delete 权限，有关联文章时禁止）"""
     category = await db.get(Category, category_id)
     if not category:
         raise NotFoundException("分类不存在")

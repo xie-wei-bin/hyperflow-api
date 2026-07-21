@@ -47,6 +47,7 @@ from app.logger import logger
 from app.middleware.request_id import RequestIDMiddleware
 from app.middleware.timing import TimingMiddleware
 from app.routers import (
+    admin,
     article,
     auth,
     category,
@@ -70,9 +71,17 @@ async def lifespan(app: FastAPI):
 
     await logger.ainfo("app.startup", message="博客系统 API 启动中...")
 
+    # ── RBAC 初始化 ──
+    # 面试点：启动时自动 seed 默认角色和权限（幂等，可重复执行）
+    from app.database import async_session
+
+    from app.utils.rbac_seed import seed_rbac
+
+    async with async_session() as seed_db:
+        await seed_rbac(seed_db)
+        # seed_rbac 内部已 commit，这里不需要额外操作
+
     # 面试点：用 asyncio.create_task 而不是 threading.Thread
-    # 这里是 I/O 密集型（读写 Redis/MySQL），不是 CPU 密集型
-    # 异步后台任务不阻塞主线程，比多线程更轻量
     from app.utils.sync_views import run_sync_loop
 
     sync_task = _asyncio.create_task(run_sync_loop(300))
@@ -154,3 +163,4 @@ app.include_router(category.router)  # prefix=/api/categories
 app.include_router(tag.router)  # prefix=/api/tags
 app.include_router(comment.router)  # prefix=/api（评论路由前缀特殊）
 app.include_router(search.router)  # prefix=/api
+app.include_router(admin.router)  # prefix=/api/admin — RBAC 管理接口

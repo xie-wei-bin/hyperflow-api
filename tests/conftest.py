@@ -182,6 +182,13 @@ async def setup_database():
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+    # ── RBAC 初始化（测试环境也需要权限数据） ──
+    from app.utils.rbac_seed import seed_rbac
+
+    async with test_async_session() as seed_session:
+        await seed_rbac(seed_session)
+        await seed_session.commit()
+
     # 重置限流器状态（避免跨测试累加导致 429）
     limiter.reset()
 

@@ -353,7 +353,6 @@ class ConnectionManager:
         2. asyncio.gather 并发关闭——几百上千连接串行 close 会超过 K8s preStop 超时
         3. clear() 放锁内——避免和新连接写入产生数据竞争
         """
-
         # ① 锁内：快照所有连接 + 清空索引（纯内存操作，不 await）
         async with self._lock:
             snapshot: list[WSConnection] = [

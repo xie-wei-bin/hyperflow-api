@@ -36,7 +36,7 @@ class User(Base):
     )
     avatar: Mapped[str | None] = mapped_column(String(500), default=None, comment="头像URL")
     role: Mapped[str] = mapped_column(
-        Enum("user", "admin", name="user_role"),
+        Enum("user", "admin", name="user_role_enum"),
         default="user",
         comment="角色(向后兼容，新代码优先用 roles 关系)",
     )
@@ -49,6 +49,8 @@ class User(Base):
     # 面试点：user.roles 和 user.role 共存，逐步迁移
     # user.role 是旧版简单枚举（向后兼容）
     # user.roles 是新版 RBAC 多对多（用户可以有多角色）
+    # 面试点：lazy="selectin" — 异步环境下不能按需懒加载（MissingGreenlet）
+    # secondary="user_role" — 字符串引用避免循环导入（rbac.py 已 TYPE_CHECKING User）
     roles: Mapped[list["Role"]] = relationship(
         "Role", secondary="user_role", back_populates="users", lazy="selectin",
     )

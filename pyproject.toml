@@ -16,6 +16,8 @@ dependencies = [
     "alembic>=1.14.0",
     "slowapi>=0.1.0",
     "python-multipart>=0.0.18",
+    "pandas>=2.0.0",
+    "openpyxl>=3.1.0",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +28,9 @@ dev = [
     "ruff>=0.11.0",
     "mypy>=1.15.0",
     "pre-commit>=4.0.0",
+    "pytest-cov>=6.0.0",
+    "prometheus-fastapi-instrumentator>=7.0.0",
+    "celery>=5.4.0",
 ]
 
 [tool.ruff]
@@ -57,3 +62,22 @@ include = ["app*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = [
+    "--strict-markers",
+    "--cov=app",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+    "--cov-fail-under=44",
+]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/migrations/*", "tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+# 面试点：按模块展示覆盖率，locate 未覆盖代码
+# term-missing: 终端显示未覆盖行号
+# html: 生成 htmlcov/ 可视化报告
+# fail-under=75: CI 中覆盖率低于 75% 失败

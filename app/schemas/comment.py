@@ -1,9 +1,10 @@
 """评论相关 Schema"""
 
 from datetime import datetime
-from typing import Any
 
 from pydantic import BaseModel, Field
+
+from app.schemas.user import UserPublic
 
 
 class CommentCreate(BaseModel):
@@ -24,7 +25,7 @@ class CommentItem(BaseModel):
     id: int
     content: str
     article_id: int
-    user: dict[str, Any]
+    user: UserPublic | None = None  # ← 强类型，替代 dict[str, Any]
     parent_id: int | None = None
     is_deleted: bool = False
     created_at: datetime

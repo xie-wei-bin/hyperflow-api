@@ -316,7 +316,7 @@ async def like_article(
     1. Redis sismember 快速判断（毫秒级）
     2. DB UNIQUE(article_id, user_id) 最终防线（并发安全）
     """
-    await article_service.get_article_by_id(db, article_id)
+    article = await article_service.get_article_by_id(db, article_id)
     if await redis.sismember(f"blog:user:likes:{current_user.id}", str(article_id)):
         return APIResponse(message="已点赞")
     like = Like(article_id=article_id, user_id=current_user.id)
@@ -330,6 +330,16 @@ async def like_article(
     await redis.sadd(f"blog:user:likes:{current_user.id}", str(article_id))
     await redis.incr(f"blog:article:likes:{article_id}")
     await redis.zincrby("blog:article:hot", settings.HOT_RANK_LIKE_WEIGHT, str(article_id))  # 点赞权重 ×3
+
+    # ── WebSocket 实时通知 ──
+    from app.routers.ws_notify import push_notification
+
+    await push_notification(
+        db, article.author_id, current_user.id, "like",
+        f"{current_user.username} 赞了你的文章《{article.title}》",
+        article_id=article.id,
+    )
+
     return APIResponse(message="点赞成功")
 
 
@@ -364,7 +374,7 @@ async def favorite_article(
     redis: aioredis.Redis = Depends(get_redis),
 ):
     """收藏 — 同点赞的幂等去重机制"""
-    await article_service.get_article_by_id(db, article_id)
+    article = await article_service.get_article_by_id(db, article_id)
     if await redis.sismember(f"blog:user:favorites:{current_user.id}", str(article_id)):
         return APIResponse(message="已收藏")
     favorite = Favorite(article_id=article_id, user_id=current_user.id)
@@ -376,6 +386,16 @@ async def favorite_article(
         return APIResponse(message="已收藏")
     await redis.sadd(f"blog:user:favorites:{current_user.id}", str(article_id))
     await redis.zincrby("blog:article:hot", settings.HOT_RANK_FAVORITE_WEIGHT, str(article_id))
+
+    # ── WebSocket 实时通知 ──
+    from app.routers.ws_notify import push_notification
+
+    await push_notification(
+        db, article.author_id, current_user.id, "favorite",
+        f"{current_user.username} 收藏了你的文章《{article.title}》",
+        article_id=article.id,
+    )
+
     return APIResponse(message="收藏成功")
 
 

@@ -7,8 +7,35 @@ on:
     branches: [main]
 
 jobs:
+  # ── 代码质量检查 ──────────────────────────
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install ruff
+      - name: Lint (ruff)
+        run: ruff check app/
+
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Type check (mypy)
+        run: mypy app/
+
+  # ── 测试 + 覆盖率 ─────────────────────────
   test:
     runs-on: ubuntu-latest
+    needs: [lint, type-check]  # 面试点：lint 失败直接跳过测试，节省 CI 时间
 
     services:
       redis:
@@ -26,14 +53,8 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
-      - name: Lint (ruff)
-        run: ruff check app/
-
-      - name: Type check (mypy)
-        run: mypy app/
-
-      - name: Test (pytest)
-        run: python -m pytest tests/ -v
+      - name: Test with coverage
+        run: python -m pytest tests/ -v --cov=app --cov-report=xml --cov-report=term-missing
         env:
           DB_HOST: localhost
           DB_PORT: 3306
@@ -43,3 +64,12 @@ jobs:
           REDIS_URL: redis://localhost:6379/0
           JWT_SECRET_KEY: ci-test-secret-key-at-least-32-characters-long
 
+      # 面试点：覆盖率报告上传到 Codecov，README 里放 badge
+      # 替换 YOUR_CODECOV_TOKEN 或改用 GitHub Actions 自带的方式
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.xml
+          flags: unittests
+          fail_ci_if_error: false  # 覆盖率上传失败不阻塞 CI
+        continue-on-error: true  # 没有 Codecov token 时静默跳过

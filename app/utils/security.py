@@ -109,27 +109,82 @@ def create_refresh_token(data: dict[str, Any]) -> str:
     return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
-def decode_token(token: str) -> dict[str, Any] | None:
-    """
-    解码 JWT token，验证失败返回 None（不抛异常）
+# ── JWT 解码异常层级 ──────────────────────────────────
+# 面试点：为什么自定义三种异常而不是返回 None？
+# 旧版 decode_token 返回 None，调用方无法区分：
+#   "Token 过期了，请刷新" vs "Token 被篡改，可能是攻击"
+# 新版通过异常类型区分，调用方可以：
+#   - TokenExpiredError → 提示用户刷新
+#   - TokenInvalidError → 记录安全日志 + 拒绝
+#   - TokenTypeMismatchError → 记录安全日志（有人拿 refresh 当 access 用）
 
-    面试点：为什么不直接 raise？
-    调用方需要区分"没传 token"（401 请登录）和"token 过期"（401 请刷新）
-    返回 None 让调用方统一处理，避免 try/except 到处飞
-    jwt.decode拆包解密校验：拿前端传回来的加密字符串，拆回里面存的用户信息字典
-    options 是一个字典，用来开关、自定义各种校验规则，控制 decode 过程要不要做哪些安全检查
+
+class TokenExpiredError(ValueError):
+    """Token 已过期 — 客户端应刷新"""
+
+
+class TokenInvalidError(ValueError):
+    """Token 无效 — 签名错误/格式错误/缺少必要字段/被篡改"""
+
+
+class TokenTypeMismatchError(ValueError):
+    """Token type 字段不匹配 — 如拿 refresh token 当 access token 用"""
+
+
+def decode_token(token: str, expected_type: str | None = None) -> dict[str, Any]:
+    """
+    解码并校验 JWT token
+
+    Args:
+        token: JWT token 字符串
+        expected_type: 期望的 token 类型（"access" 或 "refresh"）。
+                       为 None 则不校验 type 值（仅校验存在性）。
+
+    Returns:
+        解析后的 payload 字典
+
+    Raises:
+        TokenExpiredError:      token 已过期
+        TokenInvalidError:      token 签名无效/格式错误/缺少必要字段
+        TokenTypeMismatchError: type 字段与期望值不匹配
+
+    === 面试重点 ===
+    Q: 为什么用异常而不是返回 None？
+    A: 三种失败原因需要不同处理：
+       过期 → 客户端刷新 token（正常流程）
+       篡改 → 记录安全告警，拒绝请求（可能是攻击）
+       类型不匹配 → 记录安全告警（有人拿 refresh 当 access 用）
+       返回 None 把这三种全混在一起，调用方无法区分。
+
+    Q: leeway 是干什么的？
+    A: 服务器时钟偏差容错。如果签发 Token 的服务器比验证服务器快 10 秒，
+       没有 leeway 会导致刚刚签发的 Token 被误判过期。
+       30 秒是业界常用值，覆盖 NTP 同步延迟和跨机房时钟偏差。
+
+    Q: 为什么 type 校验放在 decode_token 而不是交给调用方？
+    A: 防御内聚——之前的代码 type 校验散落在 4 个调用点，auth.py:79 甚至漏了。
+       校验逻辑和校验对象应该放在一起，不依赖调用方的自觉。
     """
     try:
         payload: dict[str, Any] = jwt.decode(
             token,
             settings.JWT_SECRET_KEY,
             algorithms=[settings.JWT_ALGORITHM],
-            # 面试点：require=["exp"] 确保 Token 含过期时间，不会接受无期限 Token
-            options={"require": ["exp", "type"]},#require 只校验字段存在
+            options={"require": ["exp", "type"]},
+            leeway=settings.JWT_LEEWAY,  # 30 秒时钟容错
         )
-        return payload
-    except PyJWTError:
-        # 面试点：PyJWTError 是 PyJWT 的基础异常，涵盖了：
-        # ExpiredSignatureError（过期）、InvalidTokenError（签名无效/篡改）、
-        # MissingRequiredClaimError（缺少必要字段）等所有情况
-        return None
+    except jwt.ExpiredSignatureError:
+        raise TokenExpiredError("Token 已过期，请刷新")
+    except jwt.MissingRequiredClaimError as e:
+        raise TokenInvalidError(f"Token 缺少必要字段: {e}")
+    except jwt.InvalidTokenError:
+        raise TokenInvalidError("Token 无效或已被篡改")
+
+    # 面试点：不仅校验 type 存在（options 已做），还校验 type 值
+    if expected_type is not None and payload.get("type") != expected_type:
+        raise TokenTypeMismatchError(
+            f"Token 类型不匹配，期望 {expected_type}，"
+            f"实际 {payload.get('type', '缺失')}"
+        )
+
+    return payload

@@ -9,6 +9,7 @@ import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database import get_db
@@ -67,6 +68,16 @@ async def create_comment(
     comment = await comment_service.create_comment(db, article_id, current_user.id, data.content)
     await redis.zincrby("blog:article:hot", settings.HOT_RANK_COMMENT_WEIGHT, str(article_id))
     await redis.delete(f"blog:comments:{article_id}")  # 新评论 → 清缓存
+
+    # ── WebSocket 实时通知：评论文章 → 通知文章作者 ──
+    from app.routers.ws_notify import push_notification
+
+    await push_notification(
+        db, article.author_id, current_user.id, "comment",
+        f"{current_user.username} 评论了你的文章《{article.title}》",
+        article_id=article.id,
+    )
+
     return APIResponse(
         code=201,
         message="评论发表成功",
@@ -94,8 +105,26 @@ async def reply_comment(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """回复评论（需认证）"""
+    """回复评论（需认证）— 并推送通知给被回复者"""
     comment = await comment_service.reply_comment(db, comment_id, current_user.id, data.content)
+
+    # ── WebSocket 实时通知：回复评论 → 通知被回复的人 ──
+    from app.routers.ws_notify import push_notification
+
+    if comment.parent_id:
+        # 获取父评论的作者
+        from sqlalchemy import select as _sel
+
+        parent_result = await db.execute(_sel(Comment).where(Comment.id == comment.parent_id))
+        parent = parent_result.scalar_one_or_none()
+        if parent:
+            await push_notification(
+                db, parent.user_id, current_user.id, "reply",
+                f"{current_user.username} 回复了你的评论",
+                article_id=comment.article_id,
+                comment_id=comment.id,
+            )
+
     return APIResponse(
         code=201,
         message="回复成功",

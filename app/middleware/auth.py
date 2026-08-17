@@ -23,7 +23,12 @@ from app.database import get_db
 from app.exceptions import ForbiddenException, UnauthorizedException
 from app.models.rbac import Permission, Role
 from app.models.user import User
-from app.utils.security import decode_token
+from app.utils.security import (
+    TokenExpiredError,
+    TokenInvalidError,
+    TokenTypeMismatchError,
+    decode_token,
+)
 
 security = HTTPBearer(auto_error=False)
 
@@ -45,12 +50,15 @@ async def get_current_user(
     if credentials is None:
         raise UnauthorizedException("请先登录")
 
-    payload = decode_token(credentials.credentials)
-    if payload is None:
-        raise UnauthorizedException("Token 无效或已过期")
-
-    if payload.get("type") != "access":
+    # 面试点：通过异常类型区分三种失败，不再混杂在 None 里
+    try:
+        payload = decode_token(credentials.credentials, expected_type="access")
+    except TokenExpiredError:
+        raise UnauthorizedException("Token 已过期，请刷新")
+    except TokenTypeMismatchError:
         raise UnauthorizedException("请使用 access token")
+    except TokenInvalidError:
+        raise UnauthorizedException("Token 无效或已被篡改")
 
     user_id = payload.get("user_id")
     if user_id is None:

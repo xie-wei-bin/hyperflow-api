@@ -25,7 +25,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.limiter import limiter
+from app.limiter import rate_limit, rate_limit_per_minute
 from app.middleware.auth import get_current_user
 from app.models.user import User
 from app.redis_client import get_redis
@@ -33,15 +33,24 @@ from app.schemas.auth import LoginRequest, LoginResponse, RefreshRequest, Regist
 from app.schemas.common import APIResponse
 from app.schemas.user import UserProfile
 from app.services import auth as auth_service
-from app.utils.security import decode_token
+from app.utils.security import (
+    TokenExpiredError,
+    TokenInvalidError,
+    TokenTypeMismatchError,
+    decode_token,
+)
 
 router = APIRouter(prefix="/api/auth", tags=["认证"])
 
 
 @router.post("/register", status_code=201, response_model=APIResponse[dict])
-@limiter.limit("5/minute")
-async def register(request: Request, data: RegisterRequest, db: AsyncSession = Depends(get_db)):
-    """用户注册 — 限流 5次/分钟/ip"""
+async def register(
+    request: Request,
+    data: RegisterRequest,
+    db: AsyncSession = Depends(get_db),
+    _rl: None = rate_limit(5, 60),  # 滑动窗口：60秒内最多5次
+):
+    """用户注册 — 限流 5次/分钟/IP"""
     user = await auth_service.register(db, data)
     return APIResponse(
         code=201,
@@ -55,12 +64,12 @@ async def register(request: Request, data: RegisterRequest, db: AsyncSession = D
 
 
 @router.post("/login", response_model=APIResponse[LoginResponse])
-@limiter.limit("10/minute")
 async def login(
     request: Request,
     data: LoginRequest,
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
+    _rl: None = rate_limit(10, 60),  # 滑动窗口：60秒内最多10次
 ):
     """
     登录 — 返回双 Token
@@ -72,10 +81,11 @@ async def login(
     """
     tokens = await auth_service.login(db, data.username, data.password)
     refresh_token = tokens["refresh_token"]
-    payload = decode_token(refresh_token)
-    if not payload:
+    # 面试点：expected_type="refresh" — type 校验从调用方收拢到 decode_token 内部
+    try:
+        payload = decode_token(refresh_token, expected_type="refresh")
+    except (TokenExpiredError, TokenInvalidError, TokenTypeMismatchError):
         from app.exceptions import UnauthorizedException
-
         raise UnauthorizedException("Token 格式错误")
     user_id = payload["user_id"]
     await redis.setex(f"blog:refresh_token:{user_id}", 60 * 60 * 24 * 7, refresh_token)
@@ -90,8 +100,9 @@ async def refresh_token(data: RefreshRequest, redis: aioredis.Redis = Depends(ge
     面试点：Refresh Token Rotation 的安全意义
     每次用旧 refresh token 换新的 → 旧 token 失效 → 攻击者偷到的 token 被废
     """
-    payload = decode_token(data.refresh_token)
-    if not payload or payload.get("type") != "refresh":
+    try:
+        payload = decode_token(data.refresh_token, expected_type="refresh")
+    except (TokenExpiredError, TokenInvalidError, TokenTypeMismatchError):
         from app.exceptions import UnauthorizedException
 
         raise UnauthorizedException("Refresh token 无效或已过期")

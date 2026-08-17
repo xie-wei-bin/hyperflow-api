@@ -33,8 +33,8 @@ class APIResponse(BaseModel, Generic[T]):
 class PaginatedData(BaseModel, Generic[T]):
     """分页数据结构"""
 
-    items: list[T]
-    total: int
-    page: int
-    page_size: int
-    total_pages: int
+    items: list[T]#当前页的数据数组
+    total: int#全部数据总数量
+    page: int#当前请求的页码
+    page_size: int#每页展示多少条
+    total_pages: int#总共有多少页

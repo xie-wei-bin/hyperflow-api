@@ -35,7 +35,6 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.database import get_db
-from app.limiter import limiter
 from app.main import app
 from app.models.base import Base
 from app.redis_client import get_redis
@@ -80,11 +79,6 @@ class MockRedis:
     面试点：只实现项目真实使用的核心方法
     不需要完整仿制所有 Redis 命令，按需实现即可
     """
-
-    def __init__(self):
-        self._data: dict[str, str] = {}
-        self._sets: dict[str, set[str]] = {}
-        self._ttl: dict[str, int] = {}
 
     async def get(self, key: str) -> str | None:
         return self._data.get(key)
@@ -148,6 +142,119 @@ class MockRedis:
     async def ping(self) -> bool:
         return True
 
+    # ── ZSet 方法（滑动窗口限流需要）──
+    # 内部用 dict[str, dict[str, float]] 模拟：{key: {member: score}}
+
+    def __init__(self):
+        self._data: dict[str, str] = {}
+        self._sets: dict[str, set[str]] = {}
+        self._ttl: dict[str, int] = {}
+        self._zsets: dict[str, dict[str, float]] = {}  # 新增
+        self._scripts: dict[str, str] = {}  # SCRIPT LOAD 缓存
+
+    async def zadd(self, key: str, mapping: dict[str, float]) -> int:
+        """ZADD key score member"""
+        if key not in self._zsets:
+            self._zsets[key] = {}
+        added = 0
+        for member, score in mapping.items():
+            if member not in self._zsets[key]:
+                added += 1
+            self._zsets[key][member] = score
+        return added
+
+    async def zcard(self, key: str) -> int:
+        """ZCARD key"""
+        return len(self._zsets.get(key, {}))
+
+    async def zremrangebyscore(self, key: str, min_score: float, max_score: float) -> int:
+        """ZREMRANGEBYSCORE key min max"""
+        if key not in self._zsets:
+            return 0
+        removed = 0
+        to_remove = []
+        for member, score in self._zsets[key].items():
+            if min_score <= score <= max_score:
+                to_remove.append(member)
+                removed += 1
+        for member in to_remove:
+            del self._zsets[key][member]
+        return removed
+
+    async def zrange(self, key: str, start: int, stop: int, withscores: bool = False):
+        """ZRANGE key start stop [WITHSCORES] — 按 score 升序"""
+        if key not in self._zsets:
+            return []
+        sorted_items = sorted(self._zsets[key].items(), key=lambda x: x[1])
+        if stop == -1:
+            stop = len(sorted_items) - 1
+        result = sorted_items[start:stop + 1]
+        if withscores:
+            flat = []
+            for member, score in result:
+                flat.append(member)
+                flat.append(str(score))
+            return flat
+        return [member for member, _ in result]
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        """EXPIRE key seconds — Mock 总是返回 True"""
+        return True
+
+    # ── Lua 脚本支持（滑动窗口限流需要）──
+
+    async def script_load(self, script: str) -> str:
+        """SCRIPT LOAD — 缓存脚本，返回假 SHA"""
+        import hashlib
+        sha = hashlib.sha1(script.encode()).hexdigest()
+        self._scripts[sha] = script
+        return sha
+
+    async def evalsha(self, sha: str, numkeys: int, *args):
+        """EVALSHA — 执行缓存的 Lua 脚本（Python 模拟滑动窗口逻辑）"""
+        if sha not in self._scripts:
+            raise Exception("NOSCRIPT No matching script")
+        # 不执行真实 Lua，直接在 Python 里实现滑动窗口逻辑
+        key = args[0]
+        window_ms = int(args[1]) * 1000
+        max_requests = int(args[2])
+        now = int(args[3])
+        request_id = str(args[4])
+
+        # ① 清理窗口外过期记录
+        window_start = now - window_ms
+        if key in self._zsets:
+            to_remove = []
+            for member, score in self._zsets[key].items():
+                if score <= window_start:
+                    to_remove.append(member)
+            for member in to_remove:
+                del self._zsets[key][member]
+
+        # ② 统计当前窗口请求数
+        count = len(self._zsets.get(key, {}))
+
+        # ③ 判断 + 记录
+        if count < max_requests:
+            if key not in self._zsets:
+                self._zsets[key] = {}
+            self._zsets[key][request_id] = float(now)
+            remaining = max_requests - count - 1
+            # 计算 reset_time
+            if self._zsets[key]:
+                oldest_score = min(s.values() for s in [self._zsets[key]])
+                reset_time = int(oldest_score) + window_ms
+            else:
+                reset_time = now + window_ms
+            return [1, remaining, reset_time]
+        else:
+            if key in self._zsets and self._zsets[key]:
+                oldest_score = min(s.values() for s in [self._zsets[key]])
+                reset_time = int(oldest_score) + window_ms
+            else:
+                reset_time = now + window_ms
+            return [0, 0, reset_time]
+
 
 mock_redis = MockRedis()
 
@@ -190,11 +297,11 @@ async def setup_database():
         await seed_session.commit()
 
     # 重置限流器状态（避免跨测试累加导致 429）
-    limiter.reset()
-
     mock_redis._data.clear()
     mock_redis._sets.clear()
     mock_redis._ttl.clear()
+    mock_redis._zsets.clear()
+    mock_redis._scripts.clear()
 
     yield
 

@@ -59,11 +59,13 @@ class MonitoredRedis:
 
     def __init__(self, client: aioredis.Redis):
         self._client = client
-
+    #Python 优先查找实例自身定义的属性：，__getattr__：属性查找失败后才执行
     # wrapper 是工厂模式：__getattr__ 是个工厂，每次有人调 redis.get，工厂现场造一个 wrapper
     # 函数出来，这个函数自带监控逻辑，然后用完就销毁。装饰器是模板印好的，闭包是现场捏的。
     def __getattr__(self, name: str):
         """
+        当访问 obj.xxx，Python 在实例、类、父类整条继承链找不到属性 xxx 时，
+        才会自动调用 __getattr__。
         劫持属性访问：业务代码调 redis.get() → 进入这里
         如果是 Redis 命令 → 包装监控逻辑；否则直接透传
         """
@@ -73,7 +75,7 @@ class MonitoredRedis:
 
         if name not in self._WRAPPED:
             return original  # 非 Redis 命令，不包装
-
+        #定义闭包 wrapper（只是定义函数，尚未执行！）
         async def wrapper(*args, **kwargs):
             start = time.perf_counter()
             try:
@@ -111,7 +113,18 @@ class MonitoredRedis:
     # 返回的是函数本身，不是函数的执行结果。Python
     # 拿到这个函数后马上调用它——wrapper("article:1")，
     # 这时候 async def wrapper 里的代码才开始跑。
-
+    """
+Python 先执行 redis.get
+找不到 .get 定义 → 调用 __getattr__("get")
+内部生成并返回 wrapper 异步函数
+⚠️ 此刻还没有执行任何 Redis 网络请求
+紧跟着 ( "article:1" ) 就是函数调用
+把参数传给刚才拿到的 wrapper：
+python运行await wrapper("article:1")
+wrapper 内部才执行：
+python运行result = await original("article:1")
+# original = _raw_redis.get
+    """
     # ── 透传非方法属性 ────────────────────────────
     async def ping(self) -> bool:
         return await self._client.ping()

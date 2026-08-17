@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    JWT_LEEWAY: int = 30  # JWT 过期容错秒数，解决服务器时钟偏差导致的误判过期
 
     # ── CORS ──────────────────────────────
     # 面试点：list[str] 类型，Pydantic 会自动解析 JSON 数组格式的环境变量

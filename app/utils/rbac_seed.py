@@ -86,7 +86,13 @@ async def seed_rbac(db: AsyncSession) -> None:
             await db.flush()
             perm_map[name] = perm
 
-    # ── 2. 创建角色 + 分配权限 ──
+    # ── 2. 创建角色 + 全量同步权限 ──
+    # 面试点：为什么用"删旧→批量插新"而不是"检查后添加"？
+    # 旧方案（检查后添加）：只增不删。如果从 ROLE_PERMISSIONS 中移除某个权限，
+    #   数据库里的旧绑定永远残留 → 权限配置与代码不一致。
+    # 新方案（全量同步）：先删该角色所有旧权限关联，再批量插入新配置。
+    #   ROLE_PERMISSIONS 是唯一真相来源，不存在代码与数据库的漂移。
+    #   注意：只同步角色-权限映射，不动用户-角色分配（那是用户数据，不是配置）。
     for role_name, perm_names in ROLE_PERMISSIONS.items():
         result = await db.execute(select(Role).where(Role.name == role_name))
         role = result.scalar_one_or_none()
@@ -95,23 +101,17 @@ async def seed_rbac(db: AsyncSession) -> None:
             db.add(role)
             await db.flush()
 
-        # 给角色关联权限（幂等：先清旧关联再重建，或检查后添加）
+        # ① 删除该角色所有旧权限关联
+        await db.execute(
+            role_permission.delete().where(role_permission.c.role_id == role.id)
+        )
+
+        # ② 批量插入新权限配置
         for pname in perm_names:
             perm = perm_map[pname]
-            # 检查关联是否已存在
-            from sqlalchemy import and_
-            result = await db.execute(
-                select(role_permission).where(
-                    and_(
-                        role_permission.c.role_id == role.id,
-                        role_permission.c.permission_id == perm.id,
-                    )
-                )
+            await db.execute(
+                role_permission.insert().values(role_id=role.id, permission_id=perm.id)
             )
-            if result.first() is None:
-                await db.execute(
-                    role_permission.insert().values(role_id=role.id, permission_id=perm.id)
-                )
 
     await db.flush()
 

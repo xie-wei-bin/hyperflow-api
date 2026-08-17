@@ -365,6 +365,7 @@ class ConnectionManager:
             self._connections.clear()
             self._conn_to_user.clear()
 
+
         await logger.ainfo(
             "ws.shutdown.start",
             total_connections=total_conns,

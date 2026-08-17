@@ -1,9 +1,9 @@
-# 博客系统 API
+# HyperFlow API — 异步内容平台
 
 [![CI](https://github.com/你的用户名/blog-system/actions/workflows/ci.yml/badge.svg)](https://github.com/你的用户名/blog-system/actions)
 [![codecov](https://codecov.io/gh/你的用户名/blog-system/branch/main/graph/badge.svg)](https://codecov.io/gh/你的用户名/blog-system)
 
-企业级博客后端系统，支持用户认证(RBAC)、文章管理、评论互动、收藏点赞、全文搜索、热门排行、数据分析、Excel 导出、Prometheus 监控。
+企业级后端系统，支持用户认证(RBAC)、文章管理、评论互动、收藏点赞、全文搜索、热门排行、数据分析、Excel 导出、Prometheus 监控。
 
 ## 技术栈
 

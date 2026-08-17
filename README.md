@@ -1,4 +1,4 @@
-# HyperFlow API — 异步内容平台
+# HyperFlow API — 异步内容平台1.0
 
 [![CI](https://github.com/你的用户名/blog-system/actions/workflows/ci.yml/badge.svg)](https://github.com/你的用户名/blog-system/actions)
 [![codecov](https://codecov.io/gh/你的用户名/blog-system/branch/main/graph/badge.svg)](https://codecov.io/gh/你的用户名/blog-system)

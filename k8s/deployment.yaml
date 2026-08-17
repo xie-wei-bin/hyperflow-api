@@ -1,0 +1,129 @@
+# 博客系统 API — K8s Deployment + Service
+#
+# === 面试重点 ===
+# Q: 怎么做优雅终止？
+# A: preStop hook sleep 5 秒 → 等 Endpoints 控制器摘除 Pod IP
+#    → 不再有新请求进来 → lifespan shutdown 优雅关闭 WS + 连接池
+#    → terminationGracePeriodSeconds 给 30 秒处理完存量请求
+#
+# Q: 怎么配资源？
+# A: requests=保底资源，limits=上限。CPU 超限 throttle，内存超限 OOMKill。
+#    先压测拿到单 Pod 容量 → 再定 requests/limits。
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blog-api
+  labels:
+    app: blog-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: blog-api
+  template:
+    metadata:
+      labels:
+        app: blog-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8000"
+    spec:
+      # ── 优雅终止 ──
+      terminationGracePeriodSeconds: 30
+
+      # ── 容器 ──
+      containers:
+      - name: api
+        image: blog-api:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+
+        # ── 资源限制 ──
+        resources:
+          requests:
+            cpu: 250m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+
+        # ── 环境变量（从 Secret/ConfigMap） ──
+        env:
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: blog-config
+              key: db_host
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: blog-secret
+              key: db_password
+        - name: REDIS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: blog-config
+              key: redis_url
+        - name: JWT_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: blog-secret
+              key: jwt_secret_key
+
+        # ── 生命周期钩子 ──
+        lifecycle:
+          preStop:
+            exec:
+              # 等 5 秒让流量摘除，然后发 SIGTERM 触发 lifespan shutdown
+              command: ["/bin/sh", "-c", "sleep 5"]
+
+        # ── 健康检查 ──
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blog-api
+spec:
+  selector:
+    app: blog-api
+  ports:
+  - port: 80
+    targetPort: 8000
+    name: http
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blog-config
+data:
+  db_host: "mysql.blog.svc.cluster.local"
+  redis_url: "redis://redis.blog.svc.cluster.local:6379/0"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: blog-secret
+type: Opaque
+stringData:
+  db_password: "your-db-password"
+  jwt_secret_key: "your-jwt-secret-at-least-32-chars"
